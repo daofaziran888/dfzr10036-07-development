@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import ROUTERS
+from app.routers import ALIAS_ROUTERS, ROUTERS
 from app.store import store
 
 app = FastAPI(title="流变工坊 · 实时CDC与流式数据同步平台", version="1.0.0")
@@ -35,6 +35,10 @@ def overview() -> dict[str, object]:
 
 
 # 资源路由含 /api/{module}，必须放在 health / overview 之后注册，
-# 否则固定路径会被动态路径抢先匹配。
+# 否则固定路径会被动态路径抢先匹配；/api/{module}/conflicts 这类只读别名
+# 还要先于通用 /api/{module}/{entry_id} 注册。
+for alias in ALIAS_ROUTERS:
+    app.include_router(alias)
+
 for module in ROUTERS:
     app.include_router(module.router)

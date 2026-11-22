@@ -29,3 +29,5 @@ class EntryPayload(BaseModel):
 class ActionPayload(BaseModel):
     action: str
     remark: str | None = None
+    # 冲突比对这类按“键”受理的动作需要显式带键，其余模块忽略该字段。
+    keys: list[str] | None = None

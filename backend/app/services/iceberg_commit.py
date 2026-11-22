@@ -4,7 +4,22 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.base import BaseModuleService
+from app.services.conflict_diff import conflict_diff_service
 from app.store import store
+
+
+def _conflict_position(entry: dict[str, Any], snapshot_no: str) -> str:
+    """冲突快照对应的源日志位点对：优先用提交记录上的真实位点。"""
+    for field in ("日志位点对", "日志位点", "源日志位点", "位点对"):
+        value = entry.get(field)
+        if value:
+            return str(value)
+    file_part = entry.get("日志文件") or entry.get("binlog文件")
+    offset = entry.get("日志偏移") or entry.get("位点")
+    if file_part or offset:
+        return f"{file_part or 'binlog'}:{offset or '0'}"
+    # 没有真实位点时按快照号派生一个确定性的位点占位，保证同一快照可重复检索。
+    return f"binlog.snapshot:{snapshot_no}"
 
 
 class IcebergCommitService(BaseModuleService):
@@ -93,7 +108,9 @@ class IcebergCommitService(BaseModuleService):
             return None
 
         table = str(entry.get("目标表", "unknown"))
-        results = {"data_diff": None, "alert": None}
+        snapshot_no = str(entry.get("快照编号", "") or f"IC-{entry_id:04d}")
+        position = _conflict_position(entry, snapshot_no)
+        results = {"data_diff": None, "alert": None, "conflict_diff": None}
 
         # 触发 data_diff 比对
         diff_rows = store.rows("data_diff")
@@ -114,6 +131,16 @@ class IcebergCommitService(BaseModuleService):
         }
         diff_rows.append(diff)
         results["data_diff"] = diff
+
+        # 生成可按目标表+冲突快照+日志位点对精确检索的比对样本索引。
+        # 冲突样本必须绑定本次快照号，绝不能落到同表已有的其他冲突样本上。
+        results["conflict_diff"] = conflict_diff_service.register(
+            target_table=table,
+            snapshot=snapshot_no,
+            log_position=position,
+            keys=entry.get("待修键"),
+            source_endpoint=str(entry.get("源端", "")) or "CDC实时流",
+        )
 
         # 创建告警
         alert_rows = store.rows("alert_rule")

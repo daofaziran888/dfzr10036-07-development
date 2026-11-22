@@ -69,6 +69,7 @@ npm run dev
 | 增量回填 | `backfill_run` | 回填任务 | 任务编号、目标表、起始位点 |
 | 告警规则 | `alert_rule` | 告警策略 | 策略编号、监控指标、告警条件 |
 | 数据比对 | `data_diff` | 比对任务 | 任务编号、源端、目标端 |
+| 冲突比对 | `conflict_diff` | 冲突比对样本 | 样本编号、目标表、冲突快照、日志位点对 |
 | 编排调度 | `task_schedule` | 调度计划 | 计划编号、关联链路、Cron表达式 |
 | 流审计 | `stream_audit` | 审计记录 | 记录编号、数据流、操作类型 |
 | 健康报告 | `stream_health` | 健康评估 | 评估编号、数据流、健康分数 |
@@ -80,6 +81,25 @@ npm run dev
   `frontend/src/domain/<模块>.ts`，用于承载真实业务差异并维持36题位容量。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+
+## 冲突比对索引
+
+湖仓提交冲突会生成可检索的比对样本，身份是 `目标表 + 冲突快照 + 日志位点对`
+三元组。同一目标表可以有多个冲突快照，检索时快照号必须精确命中，
+不存在时返回 `SNAPSHOT_NOT_FOUND`，不会退回同表的其他冲突。
+
+| 接口 | 说明 |
+| --- | --- |
+| `POST /api/conflict_diff/query` | 按三元组检索索引，返回 `index`、差异明细、候选快照与源日志 |
+| `POST /api/conflict_diff/register` | 登记新的冲突快照比对样本（键可后补） |
+| `POST /api/conflict_diff/confirm` | 确认该快照中已修复的键，仅限仍未确认、未受理的键 |
+| `POST /api/conflict_diff/recover` | 提交失败恢复：用索引发起 `复核` 或 `待修` 范围受理 |
+| `POST /api/flows/conflict-diff-recovery` | 编排入口：检索（或沿用传入索引）→ 复核/受理 → 写回受理键区间 |
+
+索引令牌绑定快照版本：确认或受理后版本推进，旧令牌再次提交只会得到
+`need_refresh`（`STALE_INDEX`）且不写入任何键；同一令牌重复派发返回
+`DUPLICATE_REQUEST`，不重复写已修复的数据。受理结果以 `受理键区间` 写回样本，
+后续检索可直接读到。
 
 领域：数据工程
 子方向：数仓与数据湖

@@ -5,7 +5,7 @@ import csv
 import io
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
@@ -94,7 +94,8 @@ def create_entry(module: str, payload: EntryPayload) -> ActionResult:
 @router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
 def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
     service = require_service(module)
-    entry, message = service.run_action(entry_id, payload.action.strip())
+    entry, message = service.run_action(
+        entry_id, payload.action.strip(), payload.keys)
     return ActionResult(ok=entry is not None, message=message, entry=entry)
 
 
@@ -123,9 +124,24 @@ def trigger_flow_ddl_propagation(ddl_entry_id: int) -> dict[str, Any]:
 
 @router.post("/flows/commit-failure-recovery")
 def trigger_flow_commit_failure_recovery(commit_entry_id: int) -> dict[str, Any]:
-    """主线链路: Iceberg提交冲突 -> 数据比对 -> 告警 -> 回填修复"""
+    """主线链路: Iceberg提交冲突 -> 数据比对 -> 冲突比对索引 -> 告警"""
     from app.services.orchestrator import flow_commit_failure_recovery
     return flow_commit_failure_recovery(commit_entry_id)
+
+
+@router.post("/flows/conflict-diff-recovery")
+def trigger_flow_conflict_diff_recovery(
+    target_table: str,
+    snapshot: str,
+    log_position: str,
+    mode: str = "待修",
+    payload: dict[str, Any] | None = Body(default=None),
+) -> dict[str, Any]:
+    """续办链路: 冲突比对数据索引 -> 复核/待修范围受理 -> 写回受理键区间"""
+    from app.services.orchestrator import flow_conflict_diff_recovery
+    body = payload or {}
+    index = body.get("index") if isinstance(body.get("index"), dict) else (body or None)
+    return flow_conflict_diff_recovery(target_table, snapshot, log_position, mode, index)
 
 
 @router.post("/flows/cache-invalidation")

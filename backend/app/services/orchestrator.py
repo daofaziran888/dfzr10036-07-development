@@ -17,6 +17,7 @@ from app.services.lag_monitor import LagMonitorService
 from app.services.checkpoint import CheckpointService
 from app.services.iceberg_commit import IcebergCommitService
 from app.services.compaction import CompactionService
+from app.services.conflict_diff import conflict_diff_service
 from app.services.ddl_handle import DdlHandleService
 
 
@@ -159,10 +160,50 @@ def flow_commit_failure_recovery(commit_entry_id: int) -> dict[str, Any]:
 
     if result.get("data_diff"):
         trace.append(f"iceberg_commit#{commit_entry_id} -> data_diff#{result['data_diff']['id']}")
+    conflict = result.get("conflict_diff") or {}
+    if conflict.get("ok") and conflict.get("index"):
+        index = conflict["index"]
+        trace.append(
+            f"iceberg_commit#{commit_entry_id} -> conflict_diff#{index['样本ID']}"
+            f"({index['冲突快照']}@{index['日志位点对']} v{index['快照版本']})"
+        )
     if result.get("alert"):
         trace.append(f"iceberg_commit#{commit_entry_id} -> alert_rule#{result['alert']['id']}")
 
-    return {"ok": True, "trace": trace, "call_count": len(trace)}
+    return {"ok": True, "trace": trace, "call_count": len(trace),
+            "conflict_diff": conflict or None}
+
+
+def flow_conflict_diff_recovery(
+    target_table: str,
+    snapshot: str,
+    log_position: str,
+    mode: str = "待修",
+    index: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """提交失败恢复续办: 冲突比对数据索引 -> 复核/待修范围受理 -> 写回键区间。
+
+    未传索引时先按目标表+冲突快照+日志位点对精确检索；传了旧索引则先交给
+    领域服务做版本校验，过期会显式返回 need_refresh，而不是退回到同表其他冲突。
+    """
+    trace: list[str] = []
+    if index is None:
+        located = conflict_diff_service.query(
+            target_table=target_table,
+            snapshot=snapshot,
+            log_position=log_position,
+        )
+        if not located.get("ok"):
+            return {"ok": False, "step": "conflict_diff.query", **located}
+        index = located["index"]
+        trace.append(f"conflict_diff#{index['样本ID']} 检索命中 {index['冲突快照']}@{index['日志位点对']}")
+
+    result = conflict_diff_service.recover(index, mode)
+    trace.append(
+        f"conflict_diff#{result.get('index', {}).get('样本ID', '?')} -> {mode}"
+        f"(accepted={len(result.get('accepted') or [])})"
+    )
+    return {"ok": bool(result.get("ok")), "trace": trace, "call_count": len(trace), **result}
 
 
 def flow_cache_invalidation(dim_entry_id: int) -> dict[str, Any]:
@@ -239,6 +280,7 @@ FLOWS: dict[str, Any] = {
     "lag_recovery": flow_lag_recovery,
     "ddl_propagation": flow_ddl_propagation,
     "commit_failure_recovery": flow_commit_failure_recovery,
+    "conflict_diff_recovery": flow_conflict_diff_recovery,
     "cache_invalidation": flow_cache_invalidation,
     "out_of_order_to_checkpoint": flow_out_of_order_to_checkpoint,
     "rate_propagation": flow_rate_propagation,
